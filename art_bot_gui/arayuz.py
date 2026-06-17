@@ -1,749 +1,350 @@
-"""
-Robotik Ressam VIP — Kontrol Paneli  v2.1
-==========================================
-Kurulum (sadece bir kez çalıştır):
-    pip install customtkinter websocket-client pillow
-
-Kullanım:
-    1. Bilgisayarını "Robotik_Ressam" WiFi'ına bağla (şifre: 12345678)
-    2. python robot_arayuz.py
-    3. IP kutusunda 192.168.4.1 yazar, Bağlan'a bas.
-"""
-
 import tkinter as tk
-import customtkinter as ctk
-import websocket
 import threading
-import json
 import math
-from collections import deque
-
-# ── Tema ───────────────────────────────────────────────────────────────────────
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
-
-RENK = {
-    "bg":      "#07090d",
-    "bg2":     "#0d1117",
-    "bg3":     "#111820",
-    "border":  "#1a2332",
-    "teal":    "#00c9a7",
-    "amber":   "#f59e0b",
-    "red":     "#ef4444",
-    "blue":    "#3b82f6",
-    "muted":   "#4a5568",
-    "text":    "#e2e8f0",
-    "text2":   "#718096",
-    "canvas":  "#04060a",
-    "grid":    "#0c1118",
-}
-
-CANVAS_SCALE = 1.0
-MAX_KUYRUK   = 50
-
-
-def ui(root, fn):
-    root.after(0, fn)
-
-
-class RobotArayuzu(ctk.CTk):
-
-    def __init__(self):
-        super().__init__()
-        self.title("Robotik Ressam VIP — Kontrol Paneli")
-        self.geometry("1200x720")
-        self.minsize(900, 600)
-        self.configure(fg_color=RENK["bg"])
-
-        self._ws: websocket.WebSocketApp | None = None
-        self._ws_thread: threading.Thread | None = None
-        self._connected = False
-
-        self._rx = 0.0
-        self._ry = 0.0
-        self._raci = 0.0
-
-        self._trail: list[tuple[float, float]] = [(0.0, 0.0)]
-        self._trail_color = RENK["teal"]
-        self._trail_w = 2
-
-        self._local_q: deque[dict] = deque(maxlen=MAX_KUYRUK)
-        self._keys: set[str] = set()
-
-        self._build_ui()
-        self._bind_keys()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # UI İnşası
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _build_ui(self):
-        top = ctk.CTkFrame(self, height=44, fg_color=RENK["bg2"],
-                           corner_radius=0, border_width=0)
-        top.pack(fill="x", side="top")
-        top.pack_propagate(False)
-
-        ctk.CTkLabel(top, text="⬡  ART BOT", font=("Consolas", 15, "bold"),
-                     text_color=RENK["teal"]).pack(side="left", padx=16)
-        ctk.CTkLabel(top, text="v2.1  |  WebSocket Kontrol",
-                     font=("Consolas", 10), text_color=RENK["muted"]).pack(side="left")
-
-        self._heap_lbl = ctk.CTkLabel(top, text="HEAP: —",
-                                      font=("Consolas", 10), text_color=RENK["muted"])
-        self._heap_lbl.pack(side="right", padx=16)
-
-        self._conn_dot = tk.Canvas(top, width=10, height=10,
-                                   bg=RENK["bg2"], highlightthickness=0)
-        self._conn_dot.pack(side="right", padx=(0, 4))
-        self._conn_dot.create_oval(1, 1, 9, 9, fill=RENK["red"], outline="", tags="dot")
-
-        self._conn_lbl = ctk.CTkLabel(top, text="Bağlı değil",
-                                      font=("Consolas", 10), text_color=RENK["text2"])
-        self._conn_lbl.pack(side="right", padx=(0, 6))
-
-        content = ctk.CTkFrame(self, fg_color=RENK["bg"], corner_radius=0)
-        content.pack(fill="both", expand=True)
-
-        sol = ctk.CTkFrame(content, width=210, fg_color=RENK["bg2"],
-                           corner_radius=0,
-                           border_width=1, border_color=RENK["border"])
-        sol.pack(side="left", fill="y")
-        sol.pack_propagate(False)
-        self._build_left(sol)
-
-        orta = ctk.CTkFrame(content, fg_color=RENK["bg2"], corner_radius=0,
-                            border_width=1, border_color=RENK["border"])
-        orta.pack(side="left", fill="both", expand=True)
-        self._build_center(orta)
-
-        sag = ctk.CTkFrame(content, width=240, fg_color=RENK["bg2"],
-                           corner_radius=0,
-                           border_width=1, border_color=RENK["border"])
-        sag.pack(side="right", fill="y")
-        sag.pack_propagate(False)
-        self._build_right(sag)
-
-    def _build_left(self, parent):
-        pad = dict(padx=10, pady=3)
-
-        self._section(parent, "BAĞLANTI")
-        conn_row = ctk.CTkFrame(parent, fg_color="transparent")
-        conn_row.pack(fill="x", **pad)
-        self._ip_entry = ctk.CTkEntry(conn_row, placeholder_text="192.168.4.1",
-                                      font=("Consolas", 12), width=130)
-        self._ip_entry.pack(side="left")
-        self._ip_entry.insert(0, "192.168.4.1")
-        self._baglan_btn = ctk.CTkButton(conn_row, text="Bağlan", width=60,
-                                         font=("Consolas", 11),
-                                         command=self._toggle_conn)
-        self._baglan_btn.pack(side="left", padx=(4, 0))
-
-        self._sep(parent)
-        self._section(parent, "HAREKET")
-
-        dpad = ctk.CTkFrame(parent, fg_color="transparent")
-        dpad.pack(**pad)
-
-        btn_cfg = dict(width=52, height=40, font=("Consolas", 14, "bold"),
-                       fg_color=RENK["bg3"], border_width=1,
-                       border_color=RENK["border"], text_color=RENK["text"],
-                       hover_color=RENK["border"])
-
-        ctk.CTkFrame(dpad, width=52, height=40, fg_color="transparent").grid(row=0, column=0, padx=2, pady=2)
-        ctk.CTkButton(dpad, text="▲", **btn_cfg,
-                      command=lambda: self._cmd("ileri", self._dist())).grid(row=0, column=1, padx=2, pady=2)
-        ctk.CTkFrame(dpad, width=52, height=40, fg_color="transparent").grid(row=0, column=2, padx=2, pady=2)
-
-        ctk.CTkButton(dpad, text="◄", **btn_cfg,
-                      command=lambda: self._cmd("sol", self._ang())).grid(row=1, column=0, padx=2, pady=2)
-        ctk.CTkButton(dpad, text="■", width=52, height=40,
-                      font=("Consolas", 14, "bold"),
-                      fg_color="#2a0a0a", border_width=1,
-                      border_color="#5a1a1a", text_color=RENK["red"],
-                      hover_color="#3a1010",
-                      command=self._acil).grid(row=1, column=1, padx=2, pady=2)
-        ctk.CTkButton(dpad, text="►", **btn_cfg,
-                      command=lambda: self._cmd("sag", self._ang())).grid(row=1, column=2, padx=2, pady=2)
-
-        ctk.CTkFrame(dpad, width=52, height=40, fg_color="transparent").grid(row=2, column=0, padx=2, pady=2)
-        ctk.CTkButton(dpad, text="▼", **btn_cfg,
-                      command=lambda: self._cmd("geri", self._dist())).grid(row=2, column=1, padx=2, pady=2)
-        ctk.CTkFrame(dpad, width=52, height=40, fg_color="transparent").grid(row=2, column=2, padx=2, pady=2)
-
-        for label, attr, default, unit in [
-            ("Mesafe", "_in_mesafe", "200", "mm"),
-            ("Açı",    "_in_aci",    "90",  "°"),
-        ]:
-            row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=2)
-            ctk.CTkLabel(row, text=label, font=("Consolas", 10),
-                         text_color=RENK["text2"], width=48, anchor="w").pack(side="left")
-            entry = ctk.CTkEntry(row, font=("Consolas", 11), width=64)
-            entry.insert(0, default)
-            entry.pack(side="left")
-            ctk.CTkLabel(row, text=unit, font=("Consolas", 10),
-                         text_color=RENK["muted"]).pack(side="left", padx=3)
-            setattr(self, attr, entry)
-
-        hiz_row = ctk.CTkFrame(parent, fg_color="transparent")
-        hiz_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(hiz_row, text="Hız", font=("Consolas", 10),
-                     text_color=RENK["text2"], width=48, anchor="w").pack(side="left")
-        self._hiz_val_lbl = ctk.CTkLabel(hiz_row, text="60%",
-                                         font=("Consolas", 10),
-                                         text_color=RENK["teal"], width=32)
-        self._hiz_val_lbl.pack(side="right")
-        self._hiz_slider = ctk.CTkSlider(hiz_row, from_=0.15, to=1.0,
-                                         number_of_steps=17, command=self._on_hiz)
-        self._hiz_slider.set(0.6)
-        self._hiz_slider.pack(side="left", fill="x", expand=True, padx=(0, 4))
-
-        self._sep(parent)
-
-        ctk.CTkButton(parent, text="⚠  ACİL DURDUR",
-                      font=("Consolas", 12, "bold"),
-                      fg_color="#2a0808", border_width=1,
-                      border_color="#6b1a1a", text_color=RENK["red"],
-                      hover_color="#3d1010",
-                      command=self._acil).pack(fill="x", padx=10, pady=6)
-
-        self._sep(parent)
-
-        self._section(parent, "HAZIR ŞEKİLLER")
-        boyut_row = ctk.CTkFrame(parent, fg_color="transparent")
-        boyut_row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(boyut_row, text="Boyut", font=("Consolas", 10),
-                     text_color=RENK["text2"], width=48, anchor="w").pack(side="left")
-        self._in_boyut = ctk.CTkEntry(boyut_row, font=("Consolas", 11), width=64)
-        self._in_boyut.insert(0, "200")
-        self._in_boyut.pack(side="left")
-        ctk.CTkLabel(boyut_row, text="mm", font=("Consolas", 10),
-                     text_color=RENK["muted"]).pack(side="left", padx=3)
-
-        sg = ctk.CTkFrame(parent, fg_color="transparent")
-        sg.pack(fill="x", padx=10, pady=4)
-        shapes = [("□ Kare", "kare"), ("△ Üçgen", "ucgen"),
-                  ("★ Yıldız", "yildiz"), ("◎ Spiral", "spiral")]
-        for i, (lbl, tip) in enumerate(shapes):
-            ctk.CTkButton(sg, text=lbl, font=("Consolas", 10),
-                          width=88, height=30,
-                          fg_color=RENK["bg3"], border_width=1,
-                          border_color=RENK["border"], text_color=RENK["text2"],
-                          hover_color=RENK["border"],
-                          command=lambda t=tip: self._sekil(t)).grid(
-                row=i // 2, column=i % 2, padx=2, pady=2)
-
-    def _build_center(self, parent):
-        hdr = ctk.CTkFrame(parent, height=32, fg_color="transparent")
-        hdr.pack(fill="x", padx=10, pady=(8, 2))
-        hdr.pack_propagate(False)
-
-        ctk.CTkLabel(hdr, text="ROTA TAKİBİ",
-                     font=("Consolas", 9), text_color=RENK["muted"]).pack(side="left")
-
-        self._trail_color_btn = tk.Button(
-            hdr, bg=RENK["teal"], width=2, height=1, relief="flat",
-            cursor="hand2", command=self._pick_color)
-        self._trail_color_btn.pack(side="right", padx=2)
-        ctk.CTkLabel(hdr, text="Renk", font=("Consolas", 9),
-                     text_color=RENK["text2"]).pack(side="right", padx=(0, 4))
-
-        self._kalin_slider = ctk.CTkSlider(hdr, from_=1, to=5,
-                                           number_of_steps=4, width=60,
-                                           command=lambda v: setattr(self, "_trail_w", int(v)))
-        self._kalin_slider.set(2)
-        self._kalin_slider.pack(side="right", padx=4)
-        ctk.CTkLabel(hdr, text="Kalınlık", font=("Consolas", 9),
-                     text_color=RENK["text2"]).pack(side="right")
-
-        for lbl, fn in [("🗑 Temizle", self._temizle), ("↓ PNG", self._indir)]:
-            ctk.CTkButton(hdr, text=lbl, font=("Consolas", 9),
-                          width=72, height=24,
-                          fg_color=RENK["bg3"], border_width=1,
-                          border_color=RENK["border"], text_color=RENK["text2"],
-                          hover_color=RENK["border"],
-                          command=fn).pack(side="right", padx=2)
-
-        self.canvas = tk.Canvas(parent, bg=RENK["canvas"],
-                                highlightthickness=1,
-                                highlightbackground=RENK["border"])
-        self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.canvas.bind("<Configure>", self._on_canvas_resize)
-        self.canvas.bind("<MouseWheel>", self._on_zoom)
-        self.canvas.bind("<Button-4>",   self._on_zoom)
-        self.canvas.bind("<Button-5>",   self._on_zoom)
-
-        self._canvas_ready = False
-
-    def _on_canvas_resize(self, _event=None):
-        self._canvas_ready = True
-        self._redraw_canvas()
-
-    def _cx(self): return self.canvas.winfo_width()  / 2
-    def _cy(self): return self.canvas.winfo_height() / 2
-
-    def _w2c(self, xmm, ymm):
-        return (self._cx() + xmm * CANVAS_SCALE,
-                self._cy() - ymm * CANVAS_SCALE)
-
-    def _redraw_canvas(self):
-        if not self._canvas_ready:
-            return
-        self.canvas.delete("all")
-        self._draw_grid()
-        self._draw_trail()
-        self._draw_robot()
-
-    def _draw_grid(self):
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        step = max(30, int(50 * CANVAS_SCALE))
-        cx, cy = self._cx(), self._cy()
-        for x in self._frange(cx % step, w, step):
-            self.canvas.create_line(x, 0, x, h, fill=RENK["grid"], width=1)
-        for y in self._frange(cy % step, h, step):
-            self.canvas.create_line(0, y, w, y, fill=RENK["grid"], width=1)
-        self.canvas.create_line(cx, 0, cx, h, fill="#1a2840", width=1)
-        self.canvas.create_line(0, cy, w, cy, fill="#1a2840", width=1)
-        self.canvas.create_oval(cx-4, cy-4, cx+4, cy+4,
-                                fill=RENK["red"], outline="")
-
-    def _draw_trail(self):
-        if len(self._trail) < 2:
-            return
-        for i in range(1, len(self._trail)):
-            x1, y1 = self._w2c(*self._trail[i-1])
-            x2, y2 = self._w2c(*self._trail[i])
-            self.canvas.create_line(x1, y1, x2, y2,
-                                    fill=self._trail_color,
-                                    width=self._trail_w,
-                                    capstyle=tk.ROUND, tags="trail")
-
-    def _draw_robot(self):
-        cx, cy = self._w2c(self._rx, self._ry)
-        rad = math.radians(self._raci)
-        size = 10
-        pts = []
-        for angle in [0, 2.4, -2.4]:
-            a = rad + angle
-            length = size if angle == 0 else size * 0.6
-            pts.extend([cx + length * math.sin(a),
-                        cy - length * math.cos(a)])
-        self.canvas.create_polygon(pts, fill=RENK["red"],
-                                   outline=RENK["bg"], width=1, tags="robot")
-
-    @staticmethod
-    def _frange(start, stop, step):
-        x = start
-        while x < stop:
-            yield x
-            x += step
-
-    def _on_zoom(self, event):
-        global CANVAS_SCALE
-        delta = 1.1 if (getattr(event, "delta", 0) > 0 or event.num == 4) else 0.9
-        CANVAS_SCALE = max(0.2, min(5.0, CANVAS_SCALE * delta))
-        self._redraw_canvas()
-
-    def _pick_color(self):
-        from tkinter import colorchooser
-        color = colorchooser.askcolor(color=self._trail_color,
-                                      title="Çizgi Rengi")[1]
-        if color:
-            self._trail_color = color
-            self._trail_color_btn.configure(bg=color)
-
-    def _build_right(self, parent):
-        self._section(parent, "TELEMETRİ")
-        tele_grid = ctk.CTkFrame(parent, fg_color="transparent")
-        tele_grid.pack(fill="x", padx=8, pady=4)
-
-        self._tele_labels = {}
-        cards = [
-            ("X (mm)",   "tX",  "0.0"),
-            ("Y (mm)",   "tY",  "0.0"),
-            ("Açı (°)",  "tA",  "0.0"),
-            ("Durum",    "tD",  "Bekliyor"),
-            ("Sol Puls", "tSL", "0"),
-            ("Sağ Puls", "tSR", "0"),
-        ]
-        for i, (lbl, key, default) in enumerate(cards):
-            card = ctk.CTkFrame(tele_grid, fg_color=RENK["bg3"],
-                                border_width=1, border_color=RENK["border"],
-                                corner_radius=5)
-            card.grid(row=i // 2, column=i % 2, padx=3, pady=3, sticky="ew")
-            tele_grid.columnconfigure(i % 2, weight=1)
-            ctk.CTkLabel(card, text=lbl, font=("Consolas", 8),
-                         text_color=RENK["muted"]).pack(anchor="w", padx=6, pady=(4, 0))
-            val_lbl = ctk.CTkLabel(card, text=default,
-                                   font=("Consolas", 13, "bold"),
-                                   text_color=RENK["teal"])
-            val_lbl.pack(anchor="w", padx=6, pady=(0, 4))
-            self._tele_labels[key] = val_lbl
-
-        self._sep(parent)
-        self._section(parent, "PWM")
-        pwm_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        pwm_frame.pack(fill="x", padx=8, pady=4)
-        self._pwm_bars = {}
-        for key, lbl in [("sol", "SOL"), ("sag", "SAĞ")]:
-            col = ctk.CTkFrame(pwm_frame, fg_color="transparent")
-            col.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(col, text=lbl, font=("Consolas", 8),
-                         text_color=RENK["muted"]).pack()
-            track = ctk.CTkFrame(col, height=48, fg_color=RENK["bg3"],
-                                 border_width=1, border_color=RENK["border"],
-                                 corner_radius=4)
-            track.pack(fill="x")
-            track.pack_propagate(False)
-            fill = ctk.CTkFrame(track, height=0,
-                                fg_color=RENK["blue"] if key == "sol" else RENK["teal"],
-                                corner_radius=3)
-            fill.place(relx=0, rely=1.0, relwidth=1.0, anchor="sw", relheight=0.4)
-            self._pwm_bars[key] = fill
-
-        self._sep(parent)
-        self._section(parent, "KOMUT KUYRUĞU  —  BAĞLI LİSTE")
-
-        q_hdr = ctk.CTkFrame(parent, fg_color="transparent")
-        q_hdr.pack(fill="x", padx=8, pady=(0, 4))
-        ctk.CTkLabel(q_hdr, text="head →",
-                     font=("Consolas", 9), text_color=RENK["muted"]).pack(side="left")
-        self._q_count_lbl = ctk.CTkLabel(q_hdr, text="0/50",
-                                          font=("Consolas", 9),
-                                          text_color=RENK["teal"])
-        self._q_count_lbl.pack(side="right")
-
-        self._ll_frame = ctk.CTkScrollableFrame(parent, fg_color=RENK["bg3"],
-                                                 border_width=1,
-                                                 border_color=RENK["border"],
-                                                 corner_radius=5)
-        self._ll_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self._render_ll()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Yardımcı
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _section(self, parent, text):
-        ctk.CTkLabel(parent, text=text, font=("Consolas", 9),
-                     text_color=RENK["muted"], anchor="w").pack(fill="x", padx=10, pady=(10, 2))
-
-    def _sep(self, parent):
-        ctk.CTkFrame(parent, height=1, fg_color=RENK["border"],
-                     corner_radius=0).pack(fill="x", padx=8, pady=4)
-
-    def _dist(self):
-        try:    return float(self._in_mesafe.get())
-        except: return 200.0
-
-    def _ang(self):
-        try:    return float(self._in_aci.get())
-        except: return 90.0
-
-    def _boyut(self):
-        try:    return float(self._in_boyut.get())
-        except: return 200.0
-
-    def _on_hiz(self, val):
-        self._hiz_val_lbl.configure(text=f"{int(val*100)}%")
-        self._cmd("hiz", round(val, 2))
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # WebSocket
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _toggle_conn(self):
-        if self._connected:
-            self._disconnect()
-        else:
-            self._connect()
-
-    def _connect(self):
-        ip = self._ip_entry.get().strip()
-        url = f"ws://{ip}/ws"
-        self._baglan_btn.configure(text="Bağlanıyor…", state="disabled")
-
-        def run():
-            self._ws = websocket.WebSocketApp(
-                url,
-                on_open=self._on_ws_open,
-                on_message=self._on_ws_msg,
-                on_error=self._on_ws_error,
-                on_close=self._on_ws_close,
-            )
-            self._ws.run_forever()
-
-        self._ws_thread = threading.Thread(target=run, daemon=True)
-        self._ws_thread.start()
-
-    def _disconnect(self):
-        if self._ws:
-            self._ws.close()
-
-    def _on_ws_open(self, ws):
-        self._connected = True
-        ui(self, lambda: self._set_conn_ui(True))
-        self._ws_send({"cmd": "rota_al"})
-
-    def _on_ws_msg(self, ws, raw):
-        try:
-            d = json.loads(raw)
-        except Exception:
-            return
-        ui(self, lambda d=d: self._handle_msg(d))
-
-    def _on_ws_error(self, ws, err):
-        pass
-
-    def _on_ws_close(self, ws, code, msg):
-        self._connected = False
-        ui(self, lambda: self._set_conn_ui(False))
-
-    def _ws_send(self, obj: dict):
-        if self._ws and self._connected:
-            try:
-                self._ws.send(json.dumps(obj))
-            except Exception:
-                pass
-
-    def _set_conn_ui(self, ok: bool):
-        color = RENK["teal"] if ok else RENK["red"]
-        text  = "Bağlı" if ok else "Bağlı değil"
-        btn   = "Kes" if ok else "Bağlan"
-        self._conn_dot.itemconfig("dot", fill=color)
-        self._conn_lbl.configure(text=text)
-        self._baglan_btn.configure(text=btn, state="normal")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Mesaj İşleme
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _handle_msg(self, d: dict):
-        if d.get("tip") == "durum":
-            rx, ry, ra = d.get("x", 0), d.get("y", 0), d.get("aci", 0)
-            self._tele_labels["tX"].configure(text=f"{rx:.1f}")
-            self._tele_labels["tY"].configure(text=f"{ry:.1f}")
-            self._tele_labels["tA"].configure(text=f"{ra:.1f}")
-            running = d.get("yurutuyor", False)
-            self._tele_labels["tD"].configure(
-                text="▶ Çalışıyor" if running else "■ Bekliyor",
-                text_color=RENK["amber"] if running else RENK["teal"])
-            self._tele_labels["tSL"].configure(text=str(d.get("sol_puls", 0)))
-            self._tele_labels["tSR"].configure(text=str(d.get("sag_puls", 0)))
-            heap = d.get("heap", 0)
-            self._heap_lbl.configure(text=f"HEAP: {heap/1024:.1f} KB")
-
-            for key, field in [("sol", "pwm_sol"), ("sag", "pwm_sag")]:
-                ratio = d.get(field, 0) / 1023
-                self._pwm_bars[key].place_configure(relheight=max(0.02, ratio))
-
-            if self._trail:
-                lx, ly = self._trail[-1]
-                if abs(rx - lx) > 0.5 or abs(ry - ly) > 0.5:
-                    x1, y1 = self._w2c(lx, ly)
-                    x2, y2 = self._w2c(rx, ry)
-                    self.canvas.create_line(x1, y1, x2, y2,
-                                            fill=self._trail_color,
-                                            width=self._trail_w,
-                                            capstyle=tk.ROUND, tags="trail")
-            self._trail.append((rx, ry))
-            self._rx, self._ry, self._raci = rx, ry, ra
-            self.canvas.delete("robot")
-            self._draw_robot()
-
-            q = d.get("kuyruk", 0)
-            self._q_count_lbl.configure(text=f"{q}/50")
-            while len(self._local_q) > q:
-                self._local_q.popleft()
-            self._render_ll()
-
-        elif d.get("tip") == "rota":
-            noktalar = d.get("noktalar", [])
-            self._trail = [(p["x"], p["y"]) for p in noktalar]
-            if not self._trail:
-                self._trail = [(0.0, 0.0)]
-            self._rx, self._ry = self._trail[-1] if self._trail else (0.0, 0.0)
-            self._redraw_canvas()
-
-        elif d.get("hata") == "kuyruk_dolu":
-            import tkinter.messagebox as mb
-            mb.showwarning("Kuyruk Dolu", "ESP kuyruğu dolu!\nMevcut komutların bitmesini bekle.")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Komut Gönderme
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _cmd(self, c: str, v: float = 0.0):
-        self._ws_send({"cmd": c, "val": v})
-        if c in ("ileri", "geri", "sol", "sag"):
-            if len(self._local_q) < MAX_KUYRUK:
-                self._local_q.append({"cmd": c, "val": v})
-                self._render_ll()
-
-    def _acil(self):
-        self._ws_send({"cmd": "dur"})
-        self._local_q.clear()
-        self._render_ll()
-
-    def _sekil(self, tip: str):
-        self._ws_send({"cmd": tip, "val": self._boyut()})
-        n_moves = {"kare": 8, "ucgen": 6, "yildiz": 10, "spiral": 20}.get(tip, 4)
-        moves = ["ileri", "sag"] * (n_moves // 2)
-        for m in moves:
-            if len(self._local_q) < MAX_KUYRUK:
-                self._local_q.append({"cmd": m, "val": self._boyut()})
-        self._render_ll()
-
-    def _temizle(self):
-        self._trail = [(0.0, 0.0)]
-        self._rx = self._ry = self._raci = 0.0
-        self._ws_send({"cmd": "konum_sifirla"})
-        self._local_q.clear()
-        self._redraw_canvas()
-        self._render_ll()
-
-    def _indir(self):
-        """Canvas'ı PNG olarak kaydeder. Pillow yoksa .eps olarak kaydeder."""
-        import tkinter.filedialog as fd
-        from datetime import datetime
-        fname = fd.asksaveasfilename(
-            defaultextension=".png",
-            initialfile=f"artbot_{datetime.now().strftime('%H%M%S')}.png",
-            filetypes=[("PNG", "*.png"), ("EPS", "*.eps")])
-        if not fname:
-            return
-        try:
-            from PIL import ImageGrab
-            x = self.canvas.winfo_rootx()
-            y = self.canvas.winfo_rooty()
-            w = self.canvas.winfo_width()
-            h = self.canvas.winfo_height()
-            ImageGrab.grab((x, y, x+w, y+h)).save(fname)
-        except ImportError:
-            # Pillow yoksa EPS olarak kaydet
-            eps_fname = fname.replace(".png", ".eps")
-            self.canvas.postscript(file=eps_fname)
-            import tkinter.messagebox as mb
-            mb.showinfo("Kaydedildi", f"Pillow kurulu değil, EPS olarak kaydedildi:\n{eps_fname}\n\nPillow kurmak için: pip install pillow")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Linked-List Görselleştiricisi
-    # ══════════════════════════════════════════════════════════════════════════
-
-    CMD_DISPLAY = {
-        "ileri": "ILERI", "geri": "GERI", "sol": "SOL", "sag": "SAG",
-        "dur": "DUR", "hiz": "HIZ",
-        "kare": "KARE", "ucgen": "UCGEN", "yildiz": "YILDIZ", "spiral": "SPIRAL",
+import json
+import websocket
+
+ROBOT_IP = "192.168.4.1"
+WS_URL   = f"ws://{ROBOT_IP}/ws"
+
+BG      = "#0a0a0f"
+SURFACE = "#12121a"
+BORDER  = "#1e1e2e"
+ACCENT  = "#00e5ff"
+ACCENT2 = "#ff4081"
+TEXT    = "#e8e8e8"
+MUTED   = "#606080"
+OK      = "#00c853"
+WARN    = "#ff9800"
+GERI_C  = "#7c4dff"
+
+ws_app    = None
+kuyruk    = []
+calisiyor = False
+yollar    = [{"x": 0, "y": 0}]
+pos_x, pos_y, pos_yon = 0.0, 0.0, 0.0
+
+OLCEK = 14   # 8'den 14'e çıkarıldı — çizim daha büyük
+MX    = 0
+MY    = 0
+
+def ws_gonder(obj):
+    global ws_app
+    if ws_app:
+        try: ws_app.send(json.dumps(obj))
+        except: pass
+
+def ws_mesaj(ws, message):
+    global calisiyor, pos_x, pos_y, pos_yon, yollar
+    try:
+        d = json.loads(message)
+        t = d.get("type", "")
+        if t == "pos":
+            pos_x   = d.get("x", 0)
+            pos_y   = d.get("y", 0)
+            pos_yon = d.get("yon", 0)
+            if not yollar or abs(yollar[-1]["x"]-pos_x)>0.05 or abs(yollar[-1]["y"]-pos_y)>0.05:
+                yollar.append({"x": pos_x, "y": pos_y})
+            root.after(0, konum_guncelle_ui)
+        elif t == "status":
+            mod = d.get("mod", "")
+            calisiyor = (mod == "Calisiyor")
+            root.after(0, lambda m=mod: status_guncelle_ui(m))
+        elif t == "queue":
+            items = d.get("items", [])
+            root.after(0, lambda it=items: kuyruk_guncelle_ui(it))
+    except Exception as e:
+        print("WS hata:", e)
+
+def ws_ac(ws):
+    root.after(0, lambda: bag_label.config(text="● BAĞLI", fg=OK))
+
+def ws_kapat(ws, code, msg):
+    root.after(0, lambda: bag_label.config(text="● KESİLDİ", fg=ACCENT2))
+    threading.Timer(3, ws_baslat).start()
+
+def ws_hata(ws, err):
+    root.after(0, lambda: bag_label.config(text="● HATA", fg=WARN))
+
+def ws_baslat():
+    global ws_app
+    try:
+        ws_app = websocket.WebSocketApp(
+            WS_URL, on_open=ws_ac, on_message=ws_mesaj,
+            on_close=ws_kapat, on_error=ws_hata)
+        threading.Thread(target=ws_app.run_forever, daemon=True).start()
+    except Exception as e:
+        print("Bağlantı hatası:", e)
+
+def konum_guncelle_ui():
+    lbl_x.config(text=f"X: {pos_x:.1f} cm")
+    lbl_y.config(text=f"Y: {pos_y:.1f} cm")
+    lbl_yon.config(text=f"Yön: {pos_yon:.0f}°")
+    cizimi_yenile()
+
+def status_guncelle_ui(mod):
+    renk = WARN if mod=="Calisiyor" else OK if mod=="Tamamlandi" else ACCENT
+    lbl_mod.config(text=mod.upper(), fg=renk)
+    disabled = tk.DISABLED if mod=="Calisiyor" else tk.NORMAL
+    for b in [btn_ileri, btn_geri,
+              btn_sag90, btn_sol90,
+              btn_sag60, btn_sol60,
+              btn_sag45, btn_sol45,
+              btn_sag120, btn_sol120,
+              btn_sag180, btn_run, btn_temizle]:
+        b.config(state=disabled)
+
+def kuyruk_guncelle_ui(items):
+    global kuyruk
+    kuyruk = list(items)
+    kuyruk_listbox.delete(0, tk.END)
+    icons = {
+        "ILERI":  "▲ İLERİ",
+        "GERI":   "▼ GERİ",
+        "SAG90":  "↻ SAĞ 90°",
+        "SOL90":  "↺ SOL 90°",
+        "SAG60":  "↻ SAĞ 60°",
+        "SOL60":  "↺ SOL 60°",
+        "SAG45":  "↘ SAĞ 45°",
+        "SOL45":  "↙ SOL 45°",
+        "SAG120": "↻ SAĞ 120°",
+        "SOL120": "↺ SOL 120°",
+        "SAG180": "↻ 180°",
     }
-    CMD_UNIT = {
-        "ileri": "mm", "geri": "mm", "sol": "°", "sag": "°",
-        "hiz": "%", "kare": "mm", "ucgen": "mm", "yildiz": "mm", "spiral": "mm",
-    }
+    for i, k in enumerate(items):
+        kuyruk_listbox.insert(tk.END, f"  {i+1:02d}  {icons.get(k,k)}")
+    lbl_kuyruk_sayi.config(text=f"{len(items)} komut")
 
-    def _render_ll(self):
-        for w in self._ll_frame.winfo_children():
-            w.destroy()
+def ekle(cmd):
+    if calisiyor: return
+    ws_gonder({"type": "add", "cmd": cmd})
 
-        q = list(self._local_q)
+def calistir():
+    if calisiyor or not kuyruk: return
+    ws_gonder({"type": "run"})
 
-        if not q:
-            ctk.CTkLabel(self._ll_frame,
-                         text="[ Kuyruk boş ]  →  NULL",
-                         font=("Consolas", 10),
-                         text_color=RENK["muted"]).pack(pady=12)
-            return
+def acil_stop():
+    ws_gonder({"type": "stop"})
 
-        visible = q[:14]
+def temizle():
+    if calisiyor: return
+    ws_gonder({"type": "clear"})
+    global yollar, pos_x, pos_y, pos_yon
+    pos_x = 0.0
+    pos_y = 0.0
+    pos_yon = 0.0
+    yollar.clear()
+    yollar.append({"x": 0, "y": 0})
+    ws_gonder({"type": "reset"})
+    konum_guncelle_ui()
 
-        for i, item in enumerate(visible):
-            is_head = (i == 0)
-            node_frame = ctk.CTkFrame(self._ll_frame, fg_color="transparent")
-            node_frame.pack(fill="x", pady=0)
+def sifirla():
+    global yollar, pos_x, pos_y, pos_yon
+    pos_x = 0.0
+    pos_y = 0.0
+    pos_yon = 0.0
+    yollar.clear()
+    yollar.append({"x": 0, "y": 0})
+    ws_gonder({"type": "reset"})
+    konum_guncelle_ui()
 
-            bc = RENK["border"]
-            bg = RENK["bg2"] if is_head else RENK["bg3"]
-            box = ctk.CTkFrame(node_frame, fg_color=bg,
-                               border_width=1, border_color=bc,
-                               corner_radius=4, height=28)
-            box.pack(fill="x", padx=4)
-            box.pack_propagate(False)
+def cizimi_yenile():
+    global MX, MY
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+    if w < 10 or h < 10: return
+    MX = w // 2
+    MY = h // 2
 
-            idx_lbl = "→" if is_head else f"{i+1:2d}"
-            ctk.CTkLabel(box, text=idx_lbl, font=("Consolas", 9),
-                         text_color=RENK["muted"], width=18).pack(side="left", padx=(4, 0))
+    canvas.delete("all")
+    canvas.create_rectangle(0, 0, w, h, fill="#080810", outline="")
 
-            cmd_txt = self.CMD_DISPLAY.get(item["cmd"], item["cmd"].upper())
-            ctk.CTkLabel(box, text=cmd_txt, font=("Consolas", 10, "bold"),
-                         text_color=RENK["teal"], width=48).pack(side="left", padx=2)
+    # Izgara — OLCEK'e göre dinamik aralık
+    grid_px = OLCEK * 5   # her 5 cm'de bir çizgi
+    for x in range(MX % grid_px, w, grid_px):
+        canvas.create_line(x, 0, x, h, fill="#0d0d1e", width=1)
+    for y in range(MY % grid_px, h, grid_px):
+        canvas.create_line(0, y, w, y, fill="#0d0d1e", width=1)
 
-            val = item.get("val", 0)
-            unit = self.CMD_UNIT.get(item["cmd"], "")
-            if val:
-                v_str = f"{int(val*100)}{unit}" if item["cmd"] == "hiz" else f"{val:.0f}{unit}"
-                ctk.CTkLabel(box, text=v_str, font=("Consolas", 9),
-                             text_color=RENK["amber"]).pack(side="left", padx=2)
+    canvas.create_line(MX, 0, MX, h, fill="#1a1a35", width=1, dash=(4,4))
+    canvas.create_line(0, MY, w, MY, fill="#1a1a35", width=1, dash=(4,4))
+    canvas.create_text(MX+10, 14,    text="+Y", fill=MUTED, font=("Consolas", 9))
+    canvas.create_text(w-20,  MY-12, text="+X", fill=MUTED, font=("Consolas", 9))
 
-            ptr_txt = "*next →" if i < len(visible) - 1 else "NULL"
-            ctk.CTkLabel(box, text=ptr_txt, font=("Consolas", 8),
-                         text_color=RENK["muted"]).pack(side="right", padx=4)
+    # Yol
+    if len(yollar) >= 2:
+        for i in range(1, len(yollar)):
+            x1 = MX + yollar[i-1]["x"] * OLCEK
+            y1 = MY - yollar[i-1]["y"] * OLCEK
+            x2 = MX + yollar[i]["x"]   * OLCEK
+            y2 = MY - yollar[i]["y"]   * OLCEK
+            canvas.create_line(x1,y1,x2,y2, fill="#004455", width=5, capstyle=tk.ROUND)
+            canvas.create_line(x1,y1,x2,y2, fill=ACCENT,   width=2, capstyle=tk.ROUND)
 
-            if i < len(visible) - 1:
-                ctk.CTkLabel(node_frame, text="│", font=("Consolas", 8),
-                             text_color=RENK["border"]).pack(anchor="w", padx=12)
+    for pt in yollar[:-1]:
+        px = MX + pt["x"] * OLCEK
+        py = MY - pt["y"] * OLCEK
+        canvas.create_oval(px-3,py-3,px+3,py+3, fill=ACCENT, outline="")
 
-        if len(q) > 14:
-            ctk.CTkLabel(self._ll_frame,
-                         text=f"  ↓  +{len(q)-14} daha…  →  NULL",
-                         font=("Consolas", 9),
-                         text_color=RENK["muted"]).pack(pady=2)
-        else:
-            ctk.CTkLabel(self._ll_frame, text="  └─  NULL",
-                         font=("Consolas", 9),
-                         text_color=RENK["muted"]).pack(pady=2)
+    # Başlangıç noktası
+    canvas.create_oval(MX-8,MY-8,MX+8,MY+8, fill="", outline=OK, width=2)
+    canvas.create_oval(MX-3,MY-3,MX+3,MY+3, fill=OK, outline="")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # Klavye
-    # ══════════════════════════════════════════════════════════════════════════
+    # Robot
+    rx = MX + pos_x * OLCEK
+    ry = MY - pos_y * OLCEK
+    canvas.create_oval(rx-16,ry-16,rx+16,ry+16, fill="", outline="#ff408133", width=1)
+    canvas.create_oval(rx-11,ry-11,rx+11,ry+11, fill="#1a0010", outline=ACCENT2, width=2)
+    canvas.create_oval(rx-5, ry-5, rx+5, ry+5,  fill=ACCENT2, outline="")
 
-    def _bind_keys(self):
-        self.bind("<KeyPress>",   self._on_key_press)
-        self.bind("<KeyRelease>", self._on_key_release)
-        self.focus_set()
+    rad = math.radians(pos_yon)
+    ox = rx + 20 * math.sin(rad)
+    oy = ry - 20 * math.cos(rad)
+    canvas.create_line(rx,ry,ox,oy, fill=ACCENT2, width=2,
+                       arrow=tk.LAST, arrowshape=(9,11,4))
 
-    def _on_key_press(self, event):
-        key = event.keysym.lower()
-        if key in self._keys:
-            return
-        self._keys.add(key)
-        focused = self.focus_get()
-        if isinstance(focused, (ctk.CTkEntry, tk.Entry)):
-            return
-        actions = {
-            "w": lambda: self._cmd("ileri", self._dist()),
-            "up": lambda: self._cmd("ileri", self._dist()),
-            "s": lambda: self._cmd("geri",  self._dist()),
-            "down": lambda: self._cmd("geri",  self._dist()),
-            "a": lambda: self._cmd("sol",   self._ang()),
-            "left": lambda: self._cmd("sol",   self._ang()),
-            "d": lambda: self._cmd("sag",   self._ang()),
-            "right": lambda: self._cmd("sag",   self._ang()),
-            "space": self._acil,
-            "r": self._temizle,
-        }
-        if key in actions:
-            actions[key]()
+    canvas.create_text(rx+15,ry-15,
+                       text=f"({pos_x:.0f},{pos_y:.0f})",
+                       fill=TEXT, font=("Consolas", 9), anchor="w")
 
-    def _on_key_release(self, event):
-        self._keys.discard(event.keysym.lower())
+def klavye_bind(event):
+    k = event.keysym
+    if   k=="Up":     ekle("ILERI")
+    elif k=="Down":   ekle("GERI")
+    elif k=="Right":  ekle("SAG90")
+    elif k=="Left":   ekle("SOL90")
+    elif k=="Return": calistir()
+    elif k=="Escape": acil_stop()
 
-    def _on_close(self):
-        self._disconnect()
-        self.after(200, self.destroy)
+# ============================================
+# PENCERE
+# ============================================
+root = tk.Tk()
+root.title("ArtBot Kontrol Paneli v8.1")
+root.configure(bg=BG)
+root.attributes("-fullscreen", True)
+root.bind("<F11>",     lambda e: root.attributes("-fullscreen", True))
+root.bind("<KeyPress>", klavye_bind)
 
+# HEADER
+header = tk.Frame(root, bg=SURFACE, height=48)
+header.pack(fill=tk.X)
+header.pack_propagate(False)
+tk.Label(header, text="ART", bg=SURFACE, fg=ACCENT,
+         font=("Consolas",16,"bold")).pack(side=tk.LEFT, padx=(20,0))
+tk.Label(header, text="BOT", bg=SURFACE, fg=TEXT,
+         font=("Consolas",16,"bold")).pack(side=tk.LEFT)
+tk.Label(header, text="v8.1  |  5cm adım  |  Eş Zamanlı Odometri",
+         bg=SURFACE, fg=MUTED, font=("Consolas",9)).pack(side=tk.LEFT, padx=20)
+bag_label = tk.Label(header, text="● BAĞLANIYOR...",
+                      bg=SURFACE, fg=MUTED, font=("Consolas",9,"bold"))
+bag_label.pack(side=tk.RIGHT, padx=20)
+tk.Button(header, text="F11: Tam Ekran  |  ESC: Çık",
+          bg=BORDER, fg=MUTED, font=("Consolas",8), bd=0, padx=8,
+          command=lambda: root.attributes("-fullscreen",
+                            not root.attributes("-fullscreen"))
+          ).pack(side=tk.RIGHT, padx=4)
 
-# ── Giriş noktası ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    app = RobotArayuzu()
-    app.mainloop()
+# LAYOUT
+layout = tk.Frame(root, bg=BG)
+layout.pack(fill=tk.BOTH, expand=True)
+
+# SOL panel — genişliği 200'e düşürüldü, canvas'a daha fazla yer
+sol = tk.Frame(layout, bg=SURFACE, width=200)
+sol.pack(side=tk.LEFT, fill=tk.Y)
+sol.pack_propagate(False)
+
+def sep(p): tk.Frame(p, bg=BORDER, height=1).pack(fill=tk.X, padx=10, pady=3)
+def sec_baslik(p, t):
+    tk.Label(p, text=t, bg=SURFACE, fg=MUTED,
+             font=("Consolas",8)).pack(anchor="w", padx=14, pady=(8,2))
+
+def komut_btn(p, text, color, fg_c, cmd):
+    b = tk.Button(p, text=text, bg=color, fg=fg_c,
+                  font=("Consolas",10,"bold"), bd=0, pady=8,
+                  cursor="hand2", activebackground=color, activeforeground=fg_c,
+                  command=cmd)
+    b.pack(fill=tk.X, padx=10, pady=1)
+    return b
+
+sec_baslik(sol, "BAĞLANTI")
+tk.Button(sol, text="↺  Yeniden Bağlan",
+          bg=BORDER, fg=TEXT, font=("Consolas",9),
+          bd=0, pady=6, cursor="hand2",
+          command=ws_baslat).pack(fill=tk.X, padx=10, pady=2)
+sep(sol)
+
+sec_baslik(sol, "KONUM")
+konum_frame = tk.Frame(sol, bg=SURFACE)
+konum_frame.pack(fill=tk.X, padx=12)
+lbl_x   = tk.Label(konum_frame, text="X: 0.0 cm", bg=SURFACE, fg=ACCENT,
+                    font=("Consolas",11,"bold"), anchor="w")
+lbl_x.pack(fill=tk.X)
+lbl_y   = tk.Label(konum_frame, text="Y: 0.0 cm", bg=SURFACE, fg=ACCENT,
+                    font=("Consolas",11,"bold"), anchor="w")
+lbl_y.pack(fill=tk.X)
+lbl_yon = tk.Label(konum_frame, text="Yön: 0°",   bg=SURFACE, fg=ACCENT2,
+                    font=("Consolas",11,"bold"), anchor="w")
+lbl_yon.pack(fill=tk.X)
+lbl_mod = tk.Label(sol, text="BEKLİYOR", bg=SURFACE, fg=OK,
+                    font=("Consolas",10,"bold"))
+lbl_mod.pack(pady=3)
+sep(sol)
+
+sec_baslik(sol, "HAREKET  (ok tuşları)")
+btn_ileri  = komut_btn(sol, "▲  İLERİ",    ACCENT,    "#000", lambda: ekle("ILERI"))
+btn_geri   = komut_btn(sol, "▼  GERİ",     GERI_C,    "#fff", lambda: ekle("GERI"))
+btn_sag90  = komut_btn(sol, "↻  SAĞ 90°",  BORDER,    TEXT,   lambda: ekle("SAG90"))
+btn_sol90  = komut_btn(sol, "↺  SOL 90°",  BORDER,    TEXT,   lambda: ekle("SOL90"))
+btn_sag60  = komut_btn(sol, "↻  SAĞ 60°",  "#162020", TEXT,   lambda: ekle("SAG60"))
+btn_sol60  = komut_btn(sol, "↺  SOL 60°",  "#162020", TEXT,   lambda: ekle("SOL60"))
+btn_sag45  = komut_btn(sol, "↘  SAĞ 45°",  "#162016", TEXT,   lambda: ekle("SAG45"))
+btn_sol45  = komut_btn(sol, "↙  SOL 45°",  "#162016", TEXT,   lambda: ekle("SOL45"))
+btn_sag120 = komut_btn(sol, "↻  SAĞ 120°", "#201616", TEXT,   lambda: ekle("SAG120"))
+btn_sol120 = komut_btn(sol, "↺  SOL 120°", "#201616", TEXT,   lambda: ekle("SOL120"))
+btn_sag180 = komut_btn(sol, "↻  180°",     "#201620", TEXT,   lambda: ekle("SAG180"))
+sep(sol)
+
+sec_baslik(sol, "KONTROL  (Enter)")
+btn_run     = komut_btn(sol, "▶  ÇALIŞTIR",        OK,      "#000", calistir)
+btn_stop    = komut_btn(sol, "■  ACİL STOP",       ACCENT2, "#fff", acil_stop)
+btn_temizle = komut_btn(sol, "✕  KUYRUĞU TEMİZLE", BORDER,  TEXT,   temizle)
+btn_sifirla = komut_btn(sol, "◎  ÇİZİMİ SIFIRLA",  BORDER,  TEXT,   sifirla)
+
+# SAĞ panel (kuyruk) — 210px
+sag = tk.Frame(layout, bg=SURFACE, width=210)
+sag.pack(side=tk.RIGHT, fill=tk.Y)
+sag.pack_propagate(False)
+
+kh = tk.Frame(sag, bg=BORDER, height=36)
+kh.pack(fill=tk.X); kh.pack_propagate(False)
+tk.Label(kh, text="KOMUT KUYRUĞU", bg=BORDER, fg=ACCENT,
+         font=("Consolas",10,"bold")).pack(side=tk.LEFT, padx=12)
+lbl_kuyruk_sayi = tk.Label(kh, text="0 komut", bg=BORDER, fg=MUTED,
+                             font=("Consolas",8))
+lbl_kuyruk_sayi.pack(side=tk.RIGHT, padx=8)
+
+kf = tk.Frame(sag, bg=SURFACE)
+kf.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+sb = tk.Scrollbar(kf, bg=BORDER, troughcolor=SURFACE, highlightthickness=0)
+sb.pack(side=tk.RIGHT, fill=tk.Y)
+kuyruk_listbox = tk.Listbox(kf, bg=BG, fg=TEXT, font=("Consolas",11),
+                              selectbackground=BORDER, selectforeground=ACCENT,
+                              bd=0, highlightthickness=0, activestyle="none",
+                              yscrollcommand=sb.set)
+kuyruk_listbox.pack(fill=tk.BOTH, expand=True)
+sb.config(command=kuyruk_listbox.yview)
+tk.Label(sag, text="Sırasıyla çalıştırılır.",
+         bg=SURFACE, fg=MUTED, font=("Consolas",8)).pack(pady=6)
+
+# ORTA CANVAS — artık daha geniş
+canvas_frame = tk.Frame(layout, bg=BG)
+canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+canvas = tk.Canvas(canvas_frame, bg="#080810", bd=0,
+                    highlightthickness=1, highlightbackground=BORDER)
+canvas.pack(fill=tk.BOTH, expand=True)
+canvas.bind("<Configure>", lambda e: cizimi_yenile())
+
+cizimi_yenile()
+ws_baslat()
+root.mainloop()
